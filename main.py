@@ -5,10 +5,16 @@ from loguru import logger
 from src.core.config import settings
 from src.ingestion.loader import WhatsAppIngestor
 from src.ingestion.transformer import ChatTransformer
+from src.analytics.engine import AnalyticsEngine
 
 
 def run_pipeline():
     logger.info("🚀 Starting Vedya Pipeline...")
+
+    # =========================================
+    # PHASE 1: DATA ENGINEERING
+    # =========================================
+    logger.info("--- Phase 1: Ingestion & Transformation ---")
 
     # --- Step 1: Ingestion ---
     logger.info("Step 1: Ingesting Chat Data")
@@ -63,6 +69,28 @@ def run_pipeline():
         json.dump(chunks_data_json, f, indent=2, ensure_ascii=False)
 
     logger.success(f"✅ Saved Human-Readable JSON: {json_path}")
+
+    logger.success("✅ Phase 1 Complete: Data is clean and structured.")
+
+
+    # =========================================
+    # PHASE 2: INSIGHTS ENGINE
+    # =========================================
+    logger.info("--- Phase 2: Deep Analytics ---")
+
+    analytics = AnalyticsEngine()
+
+    # Running on 500 messages for speed during dev.
+    # Set sample_size=None to run on ALL messages (takes time!).
+    profile = analytics.run_analysis(sentiment_sample=500)
+
+    # Save the profile
+    profile_path = settings.PROCESSED_DATA_DIR / "relationship_profile.json"
+    with open(profile_path, "w", encoding="utf-8") as f:
+        json.dump(profile, f, indent=2, ensure_ascii=False)
+
+    logger.success(f"✅ Phase 2 Complete: Relationship Profile generated at: {profile_path}")
+
 
 if __name__ == "__main__":
     run_pipeline()
