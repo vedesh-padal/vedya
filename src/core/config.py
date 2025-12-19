@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     PROCESSED_DATA_DIR: Path = DATA_DIR / "processed"
 
     # File Names
-    CHAT_FILE_NAME: str = "wts-chat-Vedesh-Divya.txt"
+    CHAT_FILE_NAME: str = "chat.txt"
 
     # Parsing Rules (Regex for 26/11/25, 6:23 PM - )
     TIMESTAMP_REGEX: str = r'^(\d{2}/\d{2}/\d{2}),\s(\d{1,2}:\d{2}\s(?:am|pm))\s-\s'
