@@ -7,6 +7,8 @@ from tqdm import tqdm
 from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
 from loguru import logger
 from src.core.config import settings
+from monthly_analytics_engine import MonthlyAnalyticsEngine
+from llm_wrapper import ollama_llm
 
 
 class AnalyticsEngine:
@@ -24,6 +26,8 @@ class AnalyticsEngine:
         self.df["time_diff"] = self.df["timestamp"].diff()
         # 'sender_changed' is True if the sender is different from the previous message
         self.df["sender_changed"] = self.df["sender"] != self.df["sender"].shift(1)
+        self.llm = ollama_llm
+
 
     def run_analysis(self, sentiment_sample=500):
         """
@@ -37,6 +41,12 @@ class AnalyticsEngine:
             "behavioral_metrics": self._get_behavioral_metrics(),
             "linguistic_metrics": self._get_linguistic_metrics(),
             "sentiment_metrics": self._get_sentiment_metrics(sentiment_sample),
+            "shared_core_lexicon": self.get_shared_core_lexicon(),
+            "personal_lexicons": self.get_personal_lexicons(),
+            "emotional_texture": self.get_emotional_texture(),
+            "question_types": self.get_question_types(),
+            "personality_profiles": self.get_personality_profiles(),
+            "monthly_analytics": MonthlyAnalyticsEngine(self.df).to_dict()
         }
         return profile
 
@@ -205,3 +215,249 @@ class AnalyticsEngine:
 
         total = len(texts)
         return {k: round((v / total) * 100, 1) for k, v in score_sums.items()}
+    
+    def get_shared_core_lexicon(self, top_k=50):
+        logger.info("Computing shared core lexicon")
+
+        df = self.df[~self.df["is_media"]]
+
+        texts = (
+            df.groupby("sender")["content"]
+            .apply(lambda x: " ".join(x))
+            .to_dict()
+        )   
+
+        vectorizer = TfidfVectorizer(
+            stop_words="english",
+            min_df=2
+        )
+
+        X = vectorizer.fit_transform(texts.values())
+        terms = np.array(vectorizer.get_feature_names_out())
+
+        sender_terms = {}
+        for i, sender in enumerate(texts.keys()):
+            scores = X[i].toarray().ravel()
+            top = terms[np.argsort(scores)[-top_k:]]
+            sender_terms[sender] = set(top)
+
+        shared = set.intersection(*sender_terms.values())
+        return list(shared)
+
+    def get_personal_lexicons(self, top_k=50):
+        df = self.df[~self.df["is_media"]].copy()
+        senders = df["sender"].unique()
+
+        texts = (
+            df.groupby("sender")["content"]
+            .apply(lambda x: " ".join(x.astype(str)))
+            .to_list()
+        )
+
+        vectorizer = TfidfVectorizer(
+            stop_words="english",
+            min_df=1
+        )
+
+        X = vectorizer.fit_transform(texts)
+        terms = np.array(vectorizer.get_feature_names_out())
+
+        sender_terms = {}
+        for i, sender in enumerate(senders):
+            scores = X[i].toarray().ravel()
+            top_terms = terms[np.argsort(scores)[-top_k:]]
+            sender_terms[sender] = set(top_terms)
+
+        personal = {}
+        for sender in senders:
+            others = set.union(
+                *[sender_terms[s] for s in senders if s != sender]
+            )
+            personal[sender] = list(sender_terms[sender] - others)
+
+        return personal
+
+
+    
+   
+
+    
+    def get_emotional_texture(self):
+        logger.info("Computing emotional texture")
+
+        soften = [
+    "maybe", "perhaps", "probably", "possibly",
+    "i think", "i guess", "i feel",
+    "idk", "not sure", "kinda", "sort of",
+    "hmm", "uh", "um",
+    "if you want", "up to you", "no pressure",
+    "just checking", "just wondering"
+         ]
+        care = [
+    "take care", "are you okay", "you okay",
+    "did you eat", "ate?", "had food",
+    "reach home", "reached?", "reach safely",
+    "sleep well", "slept?", "rest",
+    "stay safe", "be safe",
+    "let me know", "tell me when",
+    "don’t worry", "it's okay",
+    "hope you're", "hope you are"
+    ]
+
+
+        stats = {}
+
+        for sender in self.df["sender"].unique():
+            text = " ".join(
+                self.df[self.df["sender"] == sender]["content"]
+                .astype(str)
+                .str.lower()
+            )
+
+            stats[sender] = {
+                "softeners": sum(text.count(w) for w in soften),
+                "care_markers": sum(text.count(w) for w in care),
+                "exclamations": text.count("!"),
+                "ellipses": text.count("...")
+            }
+
+        return stats
+
+    def select_high_signal_messages(
+       self, sender: str,
+        max_msgs: int = 20,
+        min_chars: int = 80
+    ):
+        sdf = self.df[
+            (self.df["sender"] == sender) &
+            (~self.df["is_media"]) &
+            (self.df["content"].str.len() >= min_chars)
+        ].copy()
+
+        if sdf.empty:
+            return []
+
+        # Heuristic scoring
+        sdf["score"] = (
+            sdf["content"].str.len() * 0.6 +
+            sdf["content"].str.count("!") * 10 +
+            sdf["content"].str.count("😂|😅|🥲|😎|😏|✨|💫|🤩") * 15
+        )
+
+        # Spread across time
+        sdf = sdf.sort_values("timestamp")
+        sampled = sdf.sample(
+            n=min(max_msgs, len(sdf)),
+            weights=sdf["score"],
+            random_state=42
+        )
+
+        return sampled["content"].tolist()
+    def analyze_sender_personality(self, sender: str, max_msgs: int = 20, min_chars: int = 60):
+        """
+        Analyze a sender's personality using LLM.
+        Sends only the top high-signal messages in a single batch to avoid multiple calls.
+        """
+
+        messages = self.select_high_signal_messages(sender, max_msgs=max_msgs, min_chars=min_chars)
+        if not messages:
+            return {}
+
+        interaction_roles = [
+            "planner", "emotional anchor", "humor carrier",
+            "motivator", "mediator", "advisor", "listener",
+            "storyteller", "connector", "critic"
+        ]
+
+        numbered_messages = "\n".join(f"{i+1}. {m}" for i, m in enumerate(messages))
+
+        prompt = f"""
+    You are analyzing a person's conversational personality.
+
+    Instructions:
+    - Base analysis ONLY on provided messages
+    - Identify stable patterns, not one-off moods
+    - No moral judgment or speculation
+    - Be precise, grounded, observational
+
+    Messages:
+    {numbered_messages}
+
+    Output STRICT JSON:
+    {{
+    "dominant_tones": {{"playful":0-1, "caring":0-1, "logistical":0-1, "reflective":0-1, "detached":0-1}},
+    "core_personality_traits": [8-12 concise traits],
+    "communication_style": "5-7 sentence description",
+    "interaction_role": {interaction_roles},
+    "emotional_expression": "5 sentence summary"
+    }}
+    """.strip()
+
+        # Retry logic
+        for attempt in range(2):
+            response = self.llm(prompt)
+            if response.strip():
+                try:
+                    # Safe JSON extraction
+                    import re, json
+                    match = re.search(r"\{.*\}", response, re.DOTALL)
+                    if match:
+                        return json.loads(match.group())
+                    else:
+                        logger.warning(f"No JSON object found in LLM response for {sender}")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"JSON parse failed for {sender} (attempt {attempt+1}): {e}")
+            else:
+                logger.warning(f"Empty response for {sender} (attempt {attempt+1})")
+
+        # Fallback if LLM fails
+        logger.error(f"LLM personality analysis failed for {sender}")
+        return {
+            "dominant_tones": {t: 0 for t in ["playful", "caring", "logistical", "reflective", "detached"]},
+            "core_personality_traits": [],
+            "communication_style": "",
+            "emotional_expression": "",
+            "interaction_role": interaction_roles
+        }
+    
+    def get_personality_profiles(self):
+        if self.llm is None:
+            logger.warning("LLM not provided, skipping personality profiles")
+            return {}
+
+        results = {}
+        for sender in self.df["sender"].unique():
+            logger.info(f"Analyzing personality for {sender}")
+            results[sender] = self.analyze_sender_personality(sender)
+
+        return results
+
+    def get_question_types(self):
+        logger.info("Computing question types")
+
+        categories = {
+            "logistic": ["when", "where", "time", "reach"],
+            "emotional": ["okay", "fine", "feel"],
+            "curious": ["why", "how"],
+            "invitation": ["want", "shall", "come"]
+        }
+
+        results = {}
+
+        for sender in self.df["sender"].unique():
+            qs = self.df[
+                (self.df["sender"] == sender)
+                & (self.df["content"].str.contains("?", regex=False))
+            ]["content"].str.lower()
+
+            counts = {k: 0 for k in categories}
+            for q in qs:
+                for cat, keys in categories.items():
+                    if any(k in q for k in keys):
+                        counts[cat] += 1
+
+            results[sender] = counts
+
+        return results
+    
+
